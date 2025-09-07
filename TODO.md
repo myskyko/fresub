@@ -1,4 +1,3 @@
-- GPU version not working for i10
 - batch processing (number of windows to issue at once), but we need to think about how to iterate
 - integrate mockturtle don't-care aware lookup: in mockturtle synthesis, build TT and DC from BR and use exact_library::get_supergates(tt, dc, phase, perm) instead of exhaustive DC assignments
 - add ODC (observability don't-care) support

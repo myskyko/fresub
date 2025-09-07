@@ -47,7 +47,8 @@ namespace cuda {
 // CUDA kernel version of solve_resub_overlap using flattened array with variable divisor count
 __device__ int solve_resub_overlap_cuda(int i, int j, int k, int l, uint64_t *flat_problem, int nWords, int problem_offset, int n_divs) 
 {
-    uint32_t res = ((1U << i) | (1U << j) | (1U << k) | (1U << l)); 
+    // Return 1 if feasible, 0 otherwise (avoid bit shifts beyond 31)
+    int res = 1;
     uint64_t qs[32] = {0};
     
     for (int h = 0; h < nWords; h++) {
@@ -96,7 +97,7 @@ __device__ int solve_resub_overlap_cuda(int i, int j, int k, int l, uint64_t *fl
     
     for (int h = 0; h < 16; h++) {
         int fail = ((qs[2*h] != 0) && (qs[2*h+1] != 0));
-        res = fail ? 0 : res; // resub fails
+        if (fail) { res = 0; }
     }
     return res;
 }
@@ -104,7 +105,7 @@ __device__ int solve_resub_overlap_cuda(int i, int j, int k, int l, uint64_t *fl
 // CUDA kernel: Thread I handles i=I%THREADS_PER_PROBLEM for problem I/THREADS_PER_PROBLEM
 // Now supports variable number of divisors and inputs per problem with no wasted space
 // problem_offsets has M+1 elements where problem_offsets[M] = total_elements
-__global__ void solve_resub_problems_kernel(uint64_t *flat_problems, uint32_t *solutions, 
+__global__ void solve_resub_problems_kernel(uint64_t *flat_problems, int *solutions, 
                                            int *problem_offsets, int *num_inputs, int M) {
     int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
     int problem_id = global_tid / THREADS_PER_PROBLEM;
@@ -120,51 +121,71 @@ __global__ void solve_resub_problems_kernel(uint64_t *flat_problems, uint32_t *s
     // Compute divisor count from offsets (problem_offsets[M] contains total_elements)
     int n_divs = (problem_offsets[problem_id + 1] - problem_offset) / nWords - 1;  // -1 for target
     
-    uint32_t local_res = 0;
-    
+    // Local storage for first feasible tuple this thread finds (keep first only)
+    int li = -1, lj = -1, lk = -1, ll = -1;
+
     // Each thread handles multiple values of i using stride pattern
     // Loop only up to actual number of divisors for this problem
     for (int i = thread_in_problem; i < n_divs; i += THREADS_PER_PROBLEM) {
         for (int j = i + 1; j < n_divs; j++) {
             for (int k = j + 1; k < n_divs; k++) {
                 for (int l = k + 1; l < n_divs; l++) {
-                    uint32_t temp = solve_resub_overlap_cuda(i, j, k, l, flat_problems, nWords, problem_offset, n_divs);
-                    local_res = local_res ? local_res : temp;
+                    int ok = solve_resub_overlap_cuda(i, j, k, l, flat_problems, nWords, problem_offset, n_divs);
+                    if (ok && li == -1) {
+                        li = i; lj = j; lk = k; ll = l;
+                    }
                 }
             }
         }
     }
     
-    // Reduction within threads working on same problem
-    __shared__ uint32_t shared_results[BLOCK_SIZE];
+    // Reduction within threads working on same problem (shared memory per block)
+    __shared__ int shared_i[BLOCK_SIZE];
+    __shared__ int shared_j[BLOCK_SIZE];
+    __shared__ int shared_k[BLOCK_SIZE];
+    __shared__ int shared_l[BLOCK_SIZE];
     int shared_idx = threadIdx.x;
-    shared_results[shared_idx] = local_res;
+    shared_i[shared_idx] = li;
+    shared_j[shared_idx] = lj;
+    shared_k[shared_idx] = lk;
+    shared_l[shared_idx] = ll;
     __syncthreads();
     
     // First thread of each problem group performs reduction
     if (thread_in_problem == 0) {
-        uint32_t final_res = 0;
+        int found_any = 0;
+        int oi = -1, oj = -1, okk = -1, ol = -1;
         for (int t = 0; t < THREADS_PER_PROBLEM; t++) {
             int idx = (threadIdx.x / THREADS_PER_PROBLEM) * THREADS_PER_PROBLEM + t;
-            final_res = final_res ? final_res : shared_results[idx];
+            if (!found_any && shared_i[idx] != -1) {
+                found_any = 1;
+                oi = shared_i[idx];
+                oj = shared_j[idx];
+                okk = shared_k[idx];
+                ol = shared_l[idx];
+            }
         }
-        solutions[problem_id] = final_res;
+        // Write 4 integers per problem (or -1s if none)
+        solutions[4 * problem_id + 0] = oi;
+        solutions[4 * problem_id + 1] = oj;
+        solutions[4 * problem_id + 2] = okk;
+        solutions[4 * problem_id + 3] = ol;
     }
 }
 
 
 // Host function to launch CUDA kernel - takes pre-flattened array with offsets
 // problem_offsets has M+1 elements where problem_offsets[M] = total_elements
-void solve_resub_problems_cuda(uint64_t *flat_problems, uint32_t *solutions, 
+void solve_resub_problems_cuda(uint64_t *flat_problems, int *solutions, 
                               int *problem_offsets, int *num_inputs, int M, int total_elements) {
     // Allocate device memory
     uint64_t *d_flat_problems;
-    uint32_t *d_solutions;
+    int *d_solutions;
     int *d_problem_offsets;
     int *d_num_inputs;
     
     CHECK_CUDA_ERROR(cudaMalloc(&d_flat_problems, total_elements * sizeof(uint64_t)));
-    CHECK_CUDA_ERROR(cudaMalloc(&d_solutions, M * sizeof(uint32_t)));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_solutions, 4 * M * sizeof(int)));
     CHECK_CUDA_ERROR(cudaMalloc(&d_problem_offsets, (M + 1) * sizeof(int)));  // M+1 elements
     CHECK_CUDA_ERROR(cudaMalloc(&d_num_inputs, M * sizeof(int)));
     
@@ -183,8 +204,8 @@ void solve_resub_problems_cuda(uint64_t *flat_problems, uint32_t *solutions,
     CHECK_CUDA_ERROR(cudaGetLastError());
     CHECK_CUDA_ERROR(cudaDeviceSynchronize());
     
-    // Copy results back
-    CHECK_CUDA_ERROR(cudaMemcpy(solutions, d_solutions, M * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    // Copy results back (4 ints per problem)
+    CHECK_CUDA_ERROR(cudaMemcpy(solutions, d_solutions, 4 * M * sizeof(int), cudaMemcpyDeviceToHost));
     
     // Cleanup
     CHECK_CUDA_ERROR(cudaFree(d_flat_problems));
@@ -253,10 +274,10 @@ void feasibility_check_cuda(std::vector<Window>::iterator begin, std::vector<Win
         }
     }
     
-    // Allocate solutions array
-    std::vector<uint32_t> solutions(M);
+    // Allocate solutions array: 4 integers per problem (i,j,k,l) or -1s if none
+    std::vector<int> solutions(4 * M, -1);
     
-    // Call CUDA kernel with original interface (finds first feasible solution only)
+    // Call CUDA kernel (finds one feasible combination per problem if any)
     cuda::solve_resub_problems_cuda(flat_problems.data(), solutions.data(), 
                                     problem_offsets.data(), num_inputs.data(), 
                                     M, total_elements);
@@ -264,14 +285,13 @@ void feasibility_check_cuda(std::vector<Window>::iterator begin, std::vector<Win
     // Convert results back to feasible sets for each window
     idx = 0;
     for (auto it = begin; it != end; ++it, ++idx) {
-        uint32_t mask = solutions[idx];
-        
-        if (mask != 0) {
-            // Convert mask to indices and store in window - assume indices are valid
-            std::vector<int> indices = cuda::mask_to_indices(mask);
-            // Populate feasible_sets with divisor indices only
+        int i0 = solutions[4 * idx + 0];
+        int j0 = solutions[4 * idx + 1];
+        int k0 = solutions[4 * idx + 2];
+        int l0 = solutions[4 * idx + 3];
+        if (i0 >= 0 && j0 >= 0 && k0 >= 0 && l0 >= 0) {
             FeasibleSet fs;
-            fs.divisor_indices = std::move(indices);
+            fs.divisor_indices = {i0, j0, k0, l0};
             it->feasible_sets.push_back(std::move(fs));
         }
     }
