@@ -1,6 +1,7 @@
 #include "synthesis.hpp"
 
 #include <iostream>
+#include <array>
 #include <cassert>
 
 #include <kissat_solver.hpp>
@@ -12,6 +13,7 @@
 #include <mockturtle/views/topo_view.hpp>
 #include <mockturtle/algorithms/cleanup.hpp>
 #include <kitty/npn.hpp>
+#include <kitty/operations.hpp>
 
 using namespace std;
 
@@ -71,119 +73,16 @@ namespace fresub {
     return lib;
   }
 
-  // Helper function to try synthesis with a specific truth table
-  aigman* try_synthesis_with_truth_table(uint16_t truth_table, int num_inputs, int max_gates) {
-    // Extend truth table to 4 inputs if needed
-    uint16_t extended_truth_table = truth_table;
+  // Helper: extend a 2^n-bit pattern to 4-inputs by replication
+  static uint16_t extend_to_4_inputs(uint16_t pattern, int num_inputs) {
+    uint16_t ext = pattern;
     if (num_inputs < 4) {
-      // Extend by doubling: shift and OR for each missing input
-      for (int missing = num_inputs; missing < 4; missing++) {
+      for (int missing = num_inputs; missing < 4; ++missing) {
         int shift_amount = 1 << missing; // 2^missing
-        extended_truth_table |= (extended_truth_table << shift_amount);
+        ext |= static_cast<uint16_t>(ext << shift_amount);
       }
     }
-    // Get the static library instance
-    auto& lib = get_mockturtle_library();
-    // Create truth table object
-    kitty::static_truth_table<4> tt;
-    std::vector<uint16_t> words = {extended_truth_table};
-    kitty::create_from_words(tt, words.begin(), words.end());
-    // Perform NPN canonicalization
-    auto npn_result = kitty::exact_npn_canonization(tt);
-    auto canonical_tt = std::get<0>(npn_result);
-    // Get supergates for the canonical truth table
-    auto supergates = lib.get_supergates(canonical_tt);
-    assert(supergates && !supergates->empty());
-    // Find minimum area implementation that meets gate count constraint
-    auto best_gate = supergates->end();
-    for (auto it = supergates->begin(); it != supergates->end(); ++it) {
-      int estimated_gates = static_cast<int>(std::ceil(it->area));
-      if (estimated_gates <= max_gates) {
-	if (best_gate == supergates->end() || it->area < best_gate->area) {
-	  best_gate = it;
-	}
-      }
-    }
-    if (best_gate == supergates->end()) {
-      return nullptr;
-    }
-    // Build the optimal network using cleanup_dangling
-    // Create a new AIG network for our result
-    mockturtle::aig_network result_ntk;
-    // Create primary inputs for our result network
-    std::vector<mockturtle::aig_network::signal> pis;
-    for (int i = 0; i < 4; i++) {
-      pis.push_back(result_ntk.create_pi());
-    }
-    // Apply input permutation from NPN transformation
-    auto perm = std::get<2>(npn_result);  // Permutation vector
-    auto neg = std::get<1>(npn_result);   // Negation bitmask
-    std::vector<mockturtle::aig_network::signal> permuted_pis(4);
-    for (int i = 0; i < 4; i++) {
-      // perm[i] tells us which original input corresponds to canonical input i
-      int orig_input = perm[i];
-      auto signal = pis[orig_input];
-      // Apply input negation if needed
-      if ((neg >> orig_input) & 1) {
-	signal = result_ntk.create_not(signal);
-      }
-      permuted_pis[i] = signal;
-    }
-    // Get the database network from the library
-    const auto& db = lib.get_database();
-    // Create topo view of the database from the supergate root
-    mockturtle::topo_view topo_db{db, best_gate->root};
-    // Use cleanup_dangling to extract the logic with our permuted PIs
-    auto extracted_signals = mockturtle::cleanup_dangling(topo_db, result_ntk, permuted_pis.begin(), permuted_pis.end());
-    // Apply output polarity from NPN transformation
-    auto output_signal = extracted_signals.front();
-    // The output polarity is typically bit 4 (after the 4 input bits) in the negation bitmask
-    bool output_negated = (neg >> 4) & 1;
-    if (output_negated) {
-      output_signal = result_ntk.create_not(output_signal);
-    }
-    // Create output
-    result_ntk.create_po(output_signal);
-    // Convert mockturtle AIG to aigman
-    aigman* result_aig = new aigman(num_inputs, 1);
-    // Map mockturtle nodes to aigman nodes  
-    std::unordered_map<mockturtle::aig_network::node, int> node_map;
-    // Map primary inputs (only first num_inputs in aigman)
-    int pi_count = 0;
-    result_ntk.foreach_pi([&](auto const& n, auto i) {
-      (void)i; // Suppress unused parameter warning
-      if (pi_count < num_inputs) {
-	node_map[n] = pi_count + 1; // aigman PIs start at 1
-	pi_count++;
-      } else {
-	// Unused inputs in the extended truth table - map to constant 0
-	node_map[n] = 0; // This will create literal 0 (constant false)
-      }
-    });
-    // Process gates in topological order
-    result_ntk.foreach_gate([&](auto const& n) {
-      // Get fanins using foreach_fanin
-      std::vector<int> fanin_lits;
-      result_ntk.foreach_fanin(n, [&](auto const& fanin_signal, auto i) {
-	(void)i; // Suppress unused parameter warning
-	int fanin_node = result_ntk.get_node(fanin_signal);
-	int fanin_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(fanin_signal) ? 1 : 0);
-	fanin_lits.push_back(fanin_lit);
-      });
-      // AIG gates have exactly 2 fanins
-      assert(fanin_lits.size() == 2);
-      // Use newgate API to create AND gate
-      int new_node_id = result_aig->newgate(fanin_lits[0], fanin_lits[1]);
-      node_map[n] = new_node_id;
-    });
-    // Set output
-    result_ntk.foreach_po([&](auto const& s, auto i) {
-      (void)i; // Suppress unused parameter warning
-      auto fanin_node = result_ntk.get_node(s);
-      int output_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
-      result_aig->vPos[0] = output_lit;
-    });
-    return result_aig;
+    return ext;
   }
 
   aigman* synthesize_circuit_mockturtle(const vector<vector<bool>>& br, int max_gates) {
@@ -193,57 +92,142 @@ namespace fresub {
     while ((1 << num_inputs) < br_size) {
       num_inputs++;
     }
-    // Identify don't care patterns and fixed patterns
-    vector<int> dont_care_indices;
-    uint16_t fixed_truth_table = 0;
-    bool has_impossible = false;
-    for (size_t pattern = 0; pattern < br.size(); pattern++) {
-      if (br[pattern][1] && !br[pattern][0]) {
-        // Only output 1 is allowed
-        fixed_truth_table |= (1 << pattern);
-      } else if (!br[pattern][1] && br[pattern][0]) {
-        // Only output 0 is allowed (nothing to set in truth table)
-      } else if (br[pattern][1] && br[pattern][0]) {
-        // Both outputs allowed - don't care
-        dont_care_indices.push_back(pattern);
+    // Build fixed function truth table and don't-care mask (1-bit = don't care)
+    uint16_t func_bits = 0;
+    uint16_t dc_bits = 0;
+    for (int pattern = 0; pattern < br_size; ++pattern) {
+      const bool can0 = br[pattern][0];
+      const bool can1 = br[pattern][1];
+      if (can0 && can1) {
+        dc_bits |= static_cast<uint16_t>(1u << pattern);
+      } else if (!can0 && can1) {
+        func_bits |= static_cast<uint16_t>(1u << pattern);
+      } else if (!can0 && !can1) {
+        // Impossible pattern
+        return nullptr;
       } else {
-        // Neither output allowed - impossible
-        has_impossible = true;
-        break;
+        // can0 && !can1 => bit stays 0
       }
     }
-    assert(!has_impossible);
-    // If no don't cares, try the fixed truth table
-    int num_dont_cares = dont_care_indices.size();
-    if (num_dont_cares == 0) {
-      return try_synthesis_with_truth_table(fixed_truth_table, num_inputs, max_gates);
+    // Extend to 4 inputs
+    uint16_t func_bits_ext = extend_to_4_inputs(func_bits, num_inputs);
+    uint16_t dc_bits_ext   = extend_to_4_inputs(dc_bits, num_inputs);
+
+    // Prepare kitty truth tables
+    kitty::static_truth_table<4> tt, dc;
+    kitty::create_from_words(tt, &func_bits_ext, &func_bits_ext + 1);
+    kitty::create_from_words(dc, &dc_bits_ext, &dc_bits_ext + 1);
+
+    // NPN canonicalization of the function (not DC-aware)
+    auto npn_result = kitty::exact_npn_canonization(tt);
+    auto canonical_tt = std::get<0>(npn_result);
+    auto neg = std::get<1>(npn_result);          // bitmask: inputs [0..3], output at bit 4
+    auto perm_arr = std::get<2>(npn_result);     // array mapping canonical input i -> original input index
+
+    // Transform DC mask into the same canonical orientation
+    // Apply input negations
+    for (int i = 0; i < 4; ++i) {
+      if ((neg >> i) & 1) {
+        kitty::flip_inplace(dc, i);
+      }
     }
-    // Exhaustive search over all don't care assignments
-    aigman* best_result = nullptr;
-    int best_gates = INT_MAX;
-    int num_assignments = 1 << num_dont_cares; // 2^num_dont_cares possible assignments
-    for (int assignment = 0; assignment < num_assignments; assignment++) {
-      uint16_t truth_table = fixed_truth_table;
-      // Apply this assignment to don't care patterns
-      for (int i = 0; i < num_dont_cares; i++) {
-        if ((assignment >> i) & 1) {
-          truth_table |= (1 << dont_care_indices[i]);
+    // Apply permutation: new var i = old var perm_arr[i]
+    // We'll perform by successive swaps using a position tracker
+    std::array<uint8_t, 4> position{0,1,2,3};
+    for (int i = 0; i < 4; ++i) {
+      // find current index k of original var perm_arr[i]
+      int target_orig = perm_arr[i];
+      int k = 0;
+      for (; k < 4; ++k) {
+        if (position[k] == target_orig) break;
+      }
+      if (k != i) {
+        kitty::swap_inplace(dc, i, k);
+        std::swap(position[i], position[k]);
+      }
+    }
+
+    // Query exact library with DC lookup
+    auto& lib = get_mockturtle_library();
+    uint32_t phase = static_cast<uint32_t>(neg);
+    std::vector<uint8_t> perm_vec{ static_cast<uint8_t>(perm_arr[0]), static_cast<uint8_t>(perm_arr[1]), static_cast<uint8_t>(perm_arr[2]), static_cast<uint8_t>(perm_arr[3]) };
+    auto supergates = lib.get_supergates(canonical_tt, dc, phase, perm_vec);
+    if (!(supergates && !supergates->empty())) {
+      return nullptr;
+    }
+
+    // Pick best by estimated area within max_gates
+    auto best_gate = supergates->end();
+    for (auto it = supergates->begin(); it != supergates->end(); ++it) {
+      int estimated_gates = static_cast<int>(std::ceil(it->area));
+      if (estimated_gates <= max_gates) {
+        if (best_gate == supergates->end() || it->area < best_gate->area) {
+          best_gate = it;
         }
       }
-      aigman* result = try_synthesis_with_truth_table(truth_table, num_inputs, max_gates);
-      if (result && result->nGates < best_gates) {
-        if (best_result) delete best_result;
-        best_result = result;
-        best_gates = result->nGates;
-      } else if (result) {
-        delete result;
-      }
-      // Early termination if we found a 0-gate solution
-      if (best_gates == 0) {
-        break;
-      }
     }
-    return best_result;
+    if (best_gate == supergates->end()) {
+      return nullptr;
+    }
+
+    // Build the network using the possibly-updated phase/perm from the DC lookup
+    mockturtle::aig_network result_ntk;
+    std::vector<mockturtle::aig_network::signal> pis;
+    pis.reserve(4);
+    for (int i = 0; i < 4; ++i) {
+      pis.push_back(result_ntk.create_pi());
+    }
+    std::vector<mockturtle::aig_network::signal> permuted_pis(4);
+    for (int i = 0; i < 4; ++i) {
+      int orig_input = perm_vec[i];
+      auto signal = pis[orig_input];
+      if ((phase >> orig_input) & 1) {
+        signal = result_ntk.create_not(signal);
+      }
+      permuted_pis[i] = signal;
+    }
+    const auto& db = lib.get_database();
+    mockturtle::topo_view topo_db{db, best_gate->root};
+    auto extracted_signals = mockturtle::cleanup_dangling(topo_db, result_ntk, permuted_pis.begin(), permuted_pis.end());
+    auto output_signal = extracted_signals.front();
+    bool output_negated = (phase >> 4) & 1;
+    if (output_negated) {
+      output_signal = result_ntk.create_not(output_signal);
+    }
+    result_ntk.create_po(output_signal);
+
+    // Convert mockturtle AIG to aigman
+    aigman* result_aig = new aigman(num_inputs, 1);
+    std::unordered_map<mockturtle::aig_network::node, int> node_map;
+    int pi_count = 0;
+    result_ntk.foreach_pi([&](auto const& n, auto i) {
+      (void)i;
+      if (pi_count < num_inputs) {
+        node_map[n] = pi_count + 1;
+        ++pi_count;
+      } else {
+        node_map[n] = 0;
+      }
+    });
+    result_ntk.foreach_gate([&](auto const& n) {
+      std::vector<int> fanin_lits;
+      result_ntk.foreach_fanin(n, [&](auto const& s, auto i) {
+        (void)i;
+        int fanin_node = result_ntk.get_node(s);
+        int fanin_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
+        fanin_lits.push_back(fanin_lit);
+      });
+      assert(fanin_lits.size() == 2);
+      int new_node_id = result_aig->newgate(fanin_lits[0], fanin_lits[1]);
+      node_map[n] = new_node_id;
+    });
+    result_ntk.foreach_po([&](auto const& s, auto i) {
+      (void)i;
+      auto fanin_node = result_ntk.get_node(s);
+      int output_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
+      result_aig->vPos[0] = output_lit;
+    });
+    return result_aig;
   }
 
 }
