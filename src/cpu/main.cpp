@@ -5,6 +5,8 @@
 #include <limits>
 #include <cassert>
 #include <iostream>
+#include <random>
+#include <numeric>
 
 #include <aig.hpp>
 
@@ -27,6 +29,8 @@ struct Config {
     std::string input_file;
     std::string output_file;
     int max_cut_size = 4;
+    int k_windows = 100;        // Number of windows to process (randomly sampled)
+    unsigned int rng_seed = 42; // Seed for random sampling (deterministic by default)
     bool verbose = false;
     bool show_stats = false;
     bool use_mockturtle = true;  // Default to mockturtle synthesis
@@ -46,6 +50,8 @@ int main(int argc, char** argv) {
       config.show_stats = true;
     } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
       config.max_cut_size = std::atoi(argv[++i]);
+    } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
+      config.k_windows = std::atoi(argv[++i]);
     } else if (strcmp(argv[i], "--exopt") == 0) {
       config.use_mockturtle = false;
     } else if (strcmp(argv[i], "--mockturtle") == 0) {
@@ -56,6 +62,10 @@ int main(int argc, char** argv) {
       config.use_cuda_all = true;
     } else if (strcmp(argv[i], "--feas-all") == 0) {
       config.feas_all = true;
+    } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+      char* endp = nullptr;
+      unsigned long v = std::strtoul(argv[++i], &endp, 10);
+      config.rng_seed = static_cast<unsigned int>(v);
     } else if (argv[i][0] != '-') {
       if (config.input_file.empty()) {
 	config.input_file = argv[i];
@@ -68,6 +78,8 @@ int main(int argc, char** argv) {
     std::cerr << "Usage: " << argv[0] << " [options] <input.aig> [output.aig]\n";
     std::cerr << "Options:\n";
     std::cerr << "  -c <size>     Max cut size (default: 4)\n";
+    std::cerr << "  -k <K>        Process K random windows (default: 100)\n";
+    std::cerr << "  --seed <N>    RNG seed for -k sampling (default: 42)\n";
     std::cerr << "  -v            Verbose output\n";
     std::cerr << "  -s            Show statistics\n";
     std::cerr << "  --exopt       Use SAT-based synthesis (exopt)\n";
@@ -112,6 +124,27 @@ int main(int argc, char** argv) {
   window_extract_all(aig, config.max_cut_size, config.verbose, windows);
   if (config.verbose) {
     std::cout << "Extracted " << windows.size() << " windows\n";
+  }
+
+  // Batch mode: process K randomly selected windows (default K=100)
+  size_t total_extracted = windows.size();
+  if (config.k_windows > 0 && windows.size() > static_cast<size_t>(config.k_windows)) {
+    // Sample without replacement using a shuffled index vector
+    std::vector<size_t> idx(windows.size());
+    std::iota(idx.begin(), idx.end(), 0);
+    std::mt19937 rng(config.rng_seed);
+    std::shuffle(idx.begin(), idx.end(), rng);
+    std::vector<Window> selected;
+    selected.reserve(static_cast<size_t>(config.k_windows));
+    for (int i = 0; i < config.k_windows; ++i) {
+      selected.push_back(std::move(windows[idx[static_cast<size_t>(i)]]));
+    }
+    windows.swap(selected);
+    if (config.verbose) {
+      std::cout << "Processing a random batch of " << windows.size()
+                << " windows out of " << total_extracted << " total"
+                << " (seed=" << config.rng_seed << ")\n";
+    }
   }
 
   // Previously: excluded windows with <4 divisors. Now process all windows.
@@ -207,7 +240,8 @@ int main(int argc, char** argv) {
   // successful_resubs already computed
   if (config.show_stats || config.verbose) {
     std::cout << "\nResubstitution complete:\n";
-    std::cout << "  Windows extracted: " << windows.size() << "\n";
+    std::cout << "  Windows extracted: " << total_extracted << "\n";
+    std::cout << "  Windows processed: " << windows.size() << "\n";
     std::cout << "  Successful resubstitutions: " << successful_resubs << "\n";
     std::cout << "  Time: " << duration.count() << " ms\n";
     std::cout << "  Initial gates: " << initial_gates << "\n";

@@ -48,6 +48,8 @@ make -j$(nproc)
 ### Command Line Options
 
 - `-c <size>`: Maximum cut size for window extraction (default: 4)
+- `-k <K>`: Process K randomly selected windows (default: 100)
+- `--seed <N>`: RNG seed for `-k` sampling (default: 42)
 - `-v`: Verbose output showing detailed optimization process
 - `-s`: Show statistics summary
 - `--exopt`: Use SAT-based synthesis (exopt)
@@ -67,6 +69,9 @@ make -j$(nproc)
 
 # Use SAT-based synthesis with statistics
 ./fresub --exopt -s circuit.aig optimized.aig
+
+# Process a random batch of 200 windows
+./fresub -k 200 --seed 123 -v circuit.aig optimized.aig
 ```
 
 ## Algorithm Overview
