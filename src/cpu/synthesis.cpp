@@ -3,11 +3,14 @@
 #include <iostream>
 #include <array>
 #include <cassert>
+#include <limits>
+#include <unordered_map>
 
 #include <kissat_solver.hpp>
 #include <synth.hpp>
 
 #include <mockturtle/algorithms/node_resynthesis/xag_npn.hpp>
+#include <mockturtle/algorithms/node_resynthesis/akers.hpp>
 #include <mockturtle/networks/aig.hpp>
 #include <mockturtle/utils/tech_library.hpp>
 #include <mockturtle/views/topo_view.hpp>
@@ -18,6 +21,41 @@
 using namespace std;
 
 namespace fresub {
+
+  static aigman* convert_mockturtle_aig_to_aigman(mockturtle::aig_network const& result_ntk, int num_inputs) {
+    aigman* result_aig = new aigman(num_inputs, 1);
+    std::unordered_map<mockturtle::aig_network::node, int> node_map;
+    node_map.reserve(result_ntk.size());
+    int pi_count = 0;
+    result_ntk.foreach_pi([&](auto const& n, auto i) {
+      (void)i;
+      if (pi_count < num_inputs) {
+        node_map[n] = pi_count + 1;
+        ++pi_count;
+      } else {
+        node_map[n] = 0;
+      }
+    });
+    result_ntk.foreach_gate([&](auto const& n) {
+      std::vector<int> fanin_lits;
+      result_ntk.foreach_fanin(n, [&](auto const& s, auto i) {
+        (void)i;
+        int fanin_node = result_ntk.get_node(s);
+        int fanin_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
+        fanin_lits.push_back(fanin_lit);
+      });
+      assert(fanin_lits.size() == 2);
+      int new_node_id = result_aig->newgate(fanin_lits[0], fanin_lits[1]);
+      node_map[n] = new_node_id;
+    });
+    result_ntk.foreach_po([&](auto const& s, auto i) {
+      (void)i;
+      auto fanin_node = result_ntk.get_node(s);
+      int output_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
+      result_aig->vPos[0] = output_lit;
+    });
+    return result_aig;
+  }
 
   // Convert truth tables to exopt binary relation format
   void generate_relation(const vector<vector<uint64_t>>& truth_tables, const vector<int>& selected_divisors, int num_inputs, vector<vector<bool>>& br) {
@@ -85,39 +123,11 @@ namespace fresub {
     return ext;
   }
 
-  aigman* synthesize_circuit_mockturtle(const vector<vector<bool>>& br, int max_gates) {
-    // Determine number of inputs from BR size using ceiling log2
-    int br_size = br.size();
-    int num_inputs = 0;
-    while ((1 << num_inputs) < br_size) {
-      num_inputs++;
-    }
-    // Build fixed function truth table and don't-care mask (1-bit = don't care)
-    uint16_t func_bits = 0;
-    uint16_t dc_bits = 0;
-    for (int pattern = 0; pattern < br_size; ++pattern) {
-      const bool can0 = br[pattern][0];
-      const bool can1 = br[pattern][1];
-      if (can0 && can1) {
-        dc_bits |= static_cast<uint16_t>(1u << pattern);
-      } else if (!can0 && can1) {
-        func_bits |= static_cast<uint16_t>(1u << pattern);
-      } else if (!can0 && !can1) {
-        // Impossible pattern
-        return nullptr;
-      } else {
-        // can0 && !can1 => bit stays 0
-      }
-    }
-    // Extend to 4 inputs
-    uint16_t func_bits_ext = extend_to_4_inputs(func_bits, num_inputs);
-    uint16_t dc_bits_ext   = extend_to_4_inputs(dc_bits, num_inputs);
-
-    // Prepare kitty truth tables
-    kitty::static_truth_table<4> tt, dc;
-    kitty::create_from_words(tt, &func_bits_ext, &func_bits_ext + 1);
-    kitty::create_from_words(dc, &dc_bits_ext, &dc_bits_ext + 1);
-
+  static aigman* synthesize_mockturtle_exact(
+    kitty::static_truth_table<4> const& tt,
+    kitty::static_truth_table<4> dc,
+    int num_inputs,
+    int max_gates) {
     // NPN canonicalization of the function (not DC-aware)
     auto npn_result = kitty::exact_npn_canonization(tt);
     auto canonical_tt = std::get<0>(npn_result);
@@ -196,38 +206,83 @@ namespace fresub {
     }
     result_ntk.create_po(output_signal);
 
-    // Convert mockturtle AIG to aigman
-    aigman* result_aig = new aigman(num_inputs, 1);
-    std::unordered_map<mockturtle::aig_network::node, int> node_map;
-    int pi_count = 0;
-    result_ntk.foreach_pi([&](auto const& n, auto i) {
-      (void)i;
-      if (pi_count < num_inputs) {
-        node_map[n] = pi_count + 1;
-        ++pi_count;
+    return convert_mockturtle_aig_to_aigman(result_ntk, num_inputs);
+  }
+
+  aigman* synthesize_circuit_mockturtle(const vector<vector<bool>>& br, int max_gates) {
+    // Determine number of inputs from BR size using ceiling log2
+    int br_size = br.size();
+    int num_inputs = 0;
+    while ((1 << num_inputs) < br_size) {
+      num_inputs++;
+    }
+    // Build fixed function truth table and don't-care mask (1-bit = don't care)
+    uint16_t func_bits = 0;
+    uint16_t dc_bits = 0;
+    for (int pattern = 0; pattern < br_size; ++pattern) {
+      const bool can0 = br[pattern][0];
+      const bool can1 = br[pattern][1];
+      if (can0 && can1) {
+        dc_bits |= static_cast<uint16_t>(1u << pattern);
+      } else if (!can0 && can1) {
+        func_bits |= static_cast<uint16_t>(1u << pattern);
+      } else if (!can0 && !can1) {
+        // Impossible pattern
+        return nullptr;
       } else {
-        node_map[n] = 0;
+        // can0 && !can1 => bit stays 0
       }
+    }
+
+    uint16_t func_bits_ext = extend_to_4_inputs(func_bits, num_inputs);
+    uint16_t dc_bits_ext   = extend_to_4_inputs(dc_bits, num_inputs);
+    kitty::static_truth_table<4> tt, dc;
+    kitty::create_from_words(tt, &func_bits_ext, &func_bits_ext + 1);
+    kitty::create_from_words(dc, &dc_bits_ext, &dc_bits_ext + 1);
+
+    return synthesize_mockturtle_exact(tt, dc, num_inputs, max_gates);
+  }
+
+  aigman* synthesize_circuit_mockturtle(kitty::dynamic_truth_table const& function, int max_gates) {
+    if (function.num_vars() > 4u) {
+      return nullptr;
+    }
+
+    uint16_t func_bits = 0;
+    const auto num_patterns = 1u << function.num_vars();
+    for (uint32_t pattern = 0; pattern < num_patterns; ++pattern) {
+      if (kitty::get_bit(function, pattern)) {
+        func_bits |= static_cast<uint16_t>(1u << pattern);
+      }
+    }
+
+    uint16_t func_bits_ext = extend_to_4_inputs(func_bits, static_cast<int>(function.num_vars()));
+    uint16_t dc_bits_ext = 0;
+    kitty::static_truth_table<4> tt, dc;
+    kitty::create_from_words(tt, &func_bits_ext, &func_bits_ext + 1);
+    kitty::create_from_words(dc, &dc_bits_ext, &dc_bits_ext + 1);
+
+    return synthesize_mockturtle_exact(tt, dc, static_cast<int>(function.num_vars()), max_gates);
+  }
+
+  aigman* synthesize_lut_function(kitty::dynamic_truth_table const& function) {
+    if (function.num_vars() <= 4u) {
+      return synthesize_circuit_mockturtle(function, std::numeric_limits<int>::max());
+    }
+
+    mockturtle::aig_network result_ntk;
+    std::vector<mockturtle::aig_network::signal> pis;
+    pis.reserve(function.num_vars());
+    for (uint32_t i = 0; i < function.num_vars(); ++i) {
+      pis.push_back(result_ntk.create_pi());
+    }
+
+    mockturtle::akers_resynthesis<mockturtle::aig_network> resyn;
+    resyn(result_ntk, function, pis.begin(), pis.end(), [&](auto const& f) {
+      result_ntk.create_po(f);
     });
-    result_ntk.foreach_gate([&](auto const& n) {
-      std::vector<int> fanin_lits;
-      result_ntk.foreach_fanin(n, [&](auto const& s, auto i) {
-        (void)i;
-        int fanin_node = result_ntk.get_node(s);
-        int fanin_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
-        fanin_lits.push_back(fanin_lit);
-      });
-      assert(fanin_lits.size() == 2);
-      int new_node_id = result_aig->newgate(fanin_lits[0], fanin_lits[1]);
-      node_map[n] = new_node_id;
-    });
-    result_ntk.foreach_po([&](auto const& s, auto i) {
-      (void)i;
-      auto fanin_node = result_ntk.get_node(s);
-      int output_lit = node_map[fanin_node] * 2 + (result_ntk.is_complemented(s) ? 1 : 0);
-      result_aig->vPos[0] = output_lit;
-    });
-    return result_aig;
+
+    return convert_mockturtle_aig_to_aigman(result_ntk, static_cast<int>(function.num_vars()));
   }
 
 }

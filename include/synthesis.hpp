@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <aig.hpp>
+#include <kitty/dynamic_truth_table.hpp>
 
 namespace fresub {
 
@@ -17,5 +18,14 @@ namespace fresub {
   // Synthesize optimal circuit using mockturtle library lookup (4-input only)
   // Returns synthesized aigman* or nullptr if synthesis fails or exceeds max_gates
   aigman* synthesize_circuit_mockturtle(const std::vector<std::vector<bool>>& br, int max_gates);
+
+  // Synthesize a complete truth table using mockturtle library lookup (up to 4 inputs).
+  // Returns synthesized aigman* or nullptr if synthesis fails or exceeds max_gates.
+  aigman* synthesize_circuit_mockturtle(kitty::dynamic_truth_table const& function, int max_gates);
+
+  // Synthesize an AIG implementation for a complete LUT truth table.
+  // Uses the exact/mockturtle library path for up to 4 inputs and a mockturtle
+  // wide-function fallback otherwise.
+  aigman* synthesize_lut_function(kitty::dynamic_truth_table const& function);
 
 }
