@@ -1,18 +1,26 @@
 cmake_minimum_required(VERSION 3.18)
-project(fresub LANGUAGES CXX CUDA)
+project(fresub LANGUAGES CXX)
+
+option(ENABLE_CUDA "Build CUDA feasibility kernels" ON)
+if(ENABLE_CUDA)
+    enable_language(CUDA)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 14)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Set CUDA architecture - use single target to avoid nvlink warnings
 # You can override this by setting CMAKE_CUDA_ARCHITECTURES environment variable
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+if(ENABLE_CUDA AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # Use a single common architecture to reduce nvlink warnings
     # 75 covers most modern GPUs (RTX 20xx, GTX 16xx series)  
     set(CMAKE_CUDA_ARCHITECTURES 75)
+endif()
+
+if(ENABLE_CUDA)
+    set(CMAKE_CUDA_STANDARD 14)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
 
 # Include directories
@@ -52,12 +60,16 @@ target_link_libraries(fresub_cpu PUBLIC
     mockturtle  # Add mockturtle library for alternative synthesis
 )
 
-# Create CUDA library
-add_library(fresub_cuda STATIC ${CUDA_SOURCES})
-set_target_properties(fresub_cuda PROPERTIES 
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS OFF
-)
+if(ENABLE_CUDA)
+    # Create CUDA library
+    add_library(fresub_cuda STATIC ${CUDA_SOURCES})
+    set_target_properties(fresub_cuda PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+    )
+else()
+    add_library(fresub_cuda STATIC src/cpu/cuda_stubs.cpp)
+endif()
 
 # Main executable - clean resubstitution engine (TEMPORARILY ENABLED FOR TESTING)
 add_executable(fresub src/cpu/main.cpp)
