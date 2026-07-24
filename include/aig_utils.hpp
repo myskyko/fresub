@@ -32,7 +32,20 @@ std::unordered_set<int> compute_mffc_excluding_divisors(
   std::vector<int>& deref,
   const std::vector<int>& divisors_to_exclude);
 
+// Compute transitive fanout from root, bounded to nodes in window_nodes.
+std::unordered_set<int> compute_tfo_in_window(
+  aigman& aig,
+  int root,
+  const std::vector<int>& window_nodes);
+
 // Debug-print the full AIG structure (PIs, gates, POs) with a label.
 void print_aig(const aigman& aig, const std::string& label = "AIG");
+
+// Reads a BLIF LUT network, decomposes each LUT into AIG, and records the AIG
+// root node for each original LUT in aig.vCoverRoots.
+bool read_blif_as_cover_aig(
+  const std::string& filename,
+  aigman& aig,
+  bool verbose = false);
 
 } // namespace fresub
