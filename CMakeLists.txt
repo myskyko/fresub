@@ -82,6 +82,13 @@ target_link_libraries(fresub
     Threads::Threads
 )
 
+add_executable(fresub_lut src/cpu/main_lut.cpp)
+target_link_libraries(fresub_lut
+    fresub_cpu
+    fresub_cuda
+    Threads::Threads
+)
+
 # Note: The nvlink warnings about system libraries (librt, libpthread, libdl) 
 # are harmless and expected. They occur because nvlink skips CPU-only libraries
 # that are incompatible with CUDA device code, which is correct behavior.
