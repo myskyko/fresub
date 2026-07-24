@@ -8,3 +8,5 @@ echo ./tests/test_synthesis
 ./tests/test_synthesis | tail -n 2
 echo ./tests/test_insertion
 ./tests/test_insertion | tail -n 2
+echo ./tests/test_blif_aig_loader
+./tests/test_blif_aig_loader | tail -n 2

@@ -7,6 +7,7 @@ set(TEST_SOURCES
     test_feasibility.cpp
     test_synthesis.cpp
     test_insertion.cpp
+    test_blif_aig_loader.cpp
 )
 
 # Add test executables
@@ -20,7 +21,5 @@ foreach(test_source IN LISTS TEST_SOURCES)
         fresub_cpu 
         Threads::Threads
     )
+    add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
-
-
-

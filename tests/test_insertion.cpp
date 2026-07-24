@@ -114,7 +114,7 @@ void test_aigman_import() {
     std::cout << "Output will create new node in main AIG\n";
     
     // Actually call the import function
-    main_aig.import(synth_aig, input_mapping, output_mapping);
+    main_aig.insert(synth_aig, input_mapping, output_mapping);
     
     std::cout << "Import completed.\n";
     
