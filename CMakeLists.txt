@@ -37,6 +37,7 @@ add_subdirectory(lib)
 
 # Source files - separate library sources from main
 set(CPU_LIB_SOURCES
+    src/cpu/graph.cpp
     src/cpu/window.cpp
     src/cpu/aig_utils.cpp
     src/cpu/simulation.cpp

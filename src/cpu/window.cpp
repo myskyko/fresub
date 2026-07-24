@@ -4,9 +4,90 @@
 #include <cassert>
 #include <iostream>
 #include <queue>
+#include <set>
+#include <unordered_set>
 #include "aig_utils.hpp"
+#include "graph.hpp"
 
 namespace fresub {
+
+namespace {
+
+bool extract_bfs_tfi_window(const GraphView& graph, int target, const BfsWindowParams& ps, Window& window) {
+  if (graph.fanins[target].empty()) {
+    return false;
+  }
+
+  std::vector<bool> in_window(graph.nObjs, false);
+  std::set<int> inputs;
+  std::queue<int> queue;
+
+  window = {};
+  window.target_node = target;
+  if (static_cast<int>(graph.fanins[target].size()) > ps.max_inputs) {
+    return false;
+  }
+  in_window[target] = true;
+  window.nodes.push_back(target);
+  for (int fanin : graph.fanins[target]) {
+    inputs.insert(fanin);
+  }
+  queue.push(target);
+
+  while (!queue.empty()) {
+    const int node = queue.front();
+    queue.pop();
+
+    for (int fanin : graph.fanins[node]) {
+      if (in_window[fanin]) {
+        continue;
+      }
+      if (!graph.fanins[fanin].empty() && static_cast<int>(window.nodes.size()) < ps.max_nodes) {
+        assert(inputs.count(fanin));
+        int new_input_count = static_cast<int>(inputs.size()) - 1;
+        for (int fanin2 : graph.fanins[fanin]) {
+          if (!in_window[fanin2] && !inputs.count(fanin2)) {
+            ++new_input_count;
+          }
+        }
+        if (new_input_count <= ps.max_inputs) {
+          in_window[fanin] = true;
+          window.nodes.push_back(fanin);
+          inputs.erase(fanin);
+          for (int fanin2 : graph.fanins[fanin]) {
+            if (!in_window[fanin2]) {
+              inputs.insert(fanin2);
+            }
+          }
+          queue.push(fanin);
+        }
+      }
+    }
+  }
+
+  for (int node = 1; node < graph.nObjs && static_cast<int>(window.nodes.size()) < ps.max_nodes; ++node) {
+    if (in_window[node] || graph.fanins[node].empty()) {
+      continue;
+    }
+    bool all_fanins_inside = true;
+    for (int fanin : graph.fanins[node]) {
+      if (!in_window[fanin]) {
+        all_fanins_inside = false;
+        break;
+      }
+    }
+    if (all_fanins_inside) {
+      in_window[node] = true;
+      window.nodes.push_back(node);
+    }
+  }
+  window.inputs.assign(inputs.begin(), inputs.end());
+  std::sort(window.nodes.begin(), window.nodes.end());
+  assert(!window.inputs.empty());
+  return true;
+}
+
+} // namespace
 
 void window_extract_all(aigman& aig, int max_cut_size, bool verbose, std::vector<Window>& windows) {
   assert(aig.fSorted);
@@ -89,27 +170,72 @@ void window_extract_all(aigman& aig, int max_cut_size, bool verbose, std::vector
   }
 }
 
-std::unordered_set<int> compute_tfo_in_window(aigman& aig, int root, const std::vector<int>& window_nodes) {
-  std::unordered_set<int> tfo;
-  std::unordered_set<int> window_set(window_nodes.begin(), window_nodes.end());
-  if (aig.vvFanouts.empty()) {
-    aig.supportfanouts();
-  }
-  std::queue<int> to_visit;
-  to_visit.push(root);
-  while (!to_visit.empty()) {
-    int current = to_visit.front();
-    to_visit.pop();
-    if (tfo.find(current) == tfo.end()) {
-      tfo.insert(current);
-      for (int fanout : aig.vvFanouts[current]) {
-        if (window_set.find(fanout) != window_set.end() && tfo.find(fanout) == tfo.end()) {
-          to_visit.push(fanout);
-        }
+void window_extract_aig_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose, std::vector<Window>& windows) {
+  windows.clear();
+  const auto graph = make_aig_graph(aig);
+  for (int root : graph.roots) {
+    Window window;
+    if (!extract_bfs_tfi_window(graph, root, ps, window)) {
+      continue;
+    }
+
+    window.cut_id = -1;
+
+    std::vector<int> deref(aig.nObjs, 0);
+    const auto mffc = compute_mffc(aig, window.target_node, deref);
+    const auto tfo = compute_tfo_in_window(aig, window.target_node, window.nodes);
+    for (int node : window.nodes) {
+      if (mffc.find(node) == mffc.end() && tfo.find(node) == tfo.end()) {
+        window.divisors.push_back(node);
       }
     }
+    window.mffc_size = static_cast<int>(mffc.size());
+    windows.push_back(std::move(window));
   }
-  return tfo;
+  if (verbose) {
+    std::cout << "Extracted " << windows.size() << " AIG BFS windows\n";
+  }
+}
+
+void window_extract_lut_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose, std::vector<Window>& windows) {
+  windows.clear();
+  const auto graph = make_lut_graph(aig);
+  for (int root : graph.roots) {
+    Window window;
+    if (!extract_bfs_tfi_window(graph, root, ps, window)) {
+      continue;
+    }
+
+    window.cut_id = -1;
+    const std::vector<int> lut_nodes = window.nodes;
+
+    std::vector<int> outputs;
+    outputs.reserve(lut_nodes.size());
+    for (int node : lut_nodes) {
+      outputs.push_back(var2lit(node));
+    }
+    std::vector<int> gates;
+    aig.getgates(gates, window.inputs, outputs);
+    window.nodes = std::move(gates);
+
+    std::vector<int> deref(aig.nObjs, 0);
+    const auto mffc = compute_mffc(aig, window.target_node, deref);
+    const auto tfo = compute_tfo_in_window(aig, window.target_node, window.nodes);
+    for (int input : window.inputs) {
+      window.divisors.push_back(input);
+    }
+    for (int node : lut_nodes) {
+      if (node != window.target_node && mffc.find(node) == mffc.end() &&
+          tfo.find(node) == tfo.end()) {
+        window.divisors.push_back(node);
+      }
+    }
+    window.mffc_size = static_cast<int>(mffc.size());
+    windows.push_back(std::move(window));
+  }
+  if (verbose) {
+    std::cout << "Extracted " << windows.size() << " LUT BFS windows\n";
+  }
 }
 
 } // namespace fresub
