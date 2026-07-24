@@ -70,6 +70,7 @@ if(ENABLE_CUDA)
     )
 else()
     add_library(fresub_cuda STATIC src/cpu/cuda_stubs.cpp)
+    target_link_libraries(fresub_cuda PUBLIC fresub_cpu)
 endif()
 
 # Main executable - clean resubstitution engine (TEMPORARILY ENABLED FOR TESTING)
