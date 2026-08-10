@@ -125,10 +125,10 @@ namespace fresub {
     return applied;
   }
 
-  static int count_cover_roots(aigman const& aig, std::unordered_set<int> const& nodes) {
+  static int count_live_covers(aigman const& aig, std::unordered_set<int> const& nodes) {
     int count = 0;
-    for (int root : aig.vCoverRoots) {
-      if (nodes.count(root)) {
+    for (int node : nodes) {
+      if ((aig.vDeads.empty() || !aig.vDeads[node]) && !aig.vvCoverInputs[node].empty()) {
         ++count;
       }
     }
@@ -152,7 +152,7 @@ namespace fresub {
           selected_nodes.push_back(win.divisors[idx]);
         }
         const auto mffc = compute_mffc_excluding_divisors(aig, win.target_node, deref, selected_nodes);
-        const int removed_luts = count_cover_roots(aig, mffc);
+        const int removed_luts = count_live_covers(aig, mffc);
         const int gain = removed_luts - 1;
         if (gain <= 0) {
           continue;
@@ -198,7 +198,7 @@ namespace fresub {
       }
 
       const auto mffc = compute_mffc_excluding_divisors(aig, win.target_node, deref, selected_nodes);
-      const int removed_luts = count_cover_roots(aig, mffc);
+      const int removed_luts = count_live_covers(aig, mffc);
       const int gain = removed_luts - 1;
       if (gain <= 0) {
         ++skipped;
@@ -227,14 +227,6 @@ namespace fresub {
       }
       const int new_lit = aig.append_cover(*synth, selected_nodes);
       delete synth;
-      aig.vCoverRoots.erase(std::remove_if(aig.vCoverRoots.begin(), aig.vCoverRoots.end(),
-                                           [&](int root) { return mffc.count(root); }),
-                            aig.vCoverRoots.end());
-      for (int root : mffc) {
-        if (root < static_cast<int>(aig.vvCoverInputs.size())) {
-          aig.vvCoverInputs[root].clear();
-        }
-      }
       aig.replacenode(win.target_node, new_lit, false);
 
       if (verbose) {
@@ -249,6 +241,7 @@ namespace fresub {
     if (verbose) {
       std::cout << "LUT heap processing complete: " << applied << " applied, " << skipped << " skipped\n";
     }
+    aig.remove_dead_covers();
     return applied;
   }
 

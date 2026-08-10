@@ -235,6 +235,10 @@ bool read_blif_as_cover_aig(
     aig.vPos[static_cast<size_t>(i)] = node_to_lit.at(node) ^ (ntk.is_complemented(f) ? 1 : 0);
   });
 
+  aig.supportfanouts();
+  aig.remove_dangling_nodes();
+  aig.remove_dead_covers();
+
   if (verbose) {
     std::cout << "Read BLIF as AIG: " << aig.nPis << " PIs, " << aig.nPos
               << " POs, " << aig.nGates << " gates, " << aig.vCoverRoots.size()
