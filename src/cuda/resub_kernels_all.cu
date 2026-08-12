@@ -50,7 +50,7 @@ extern __device__ int solve_resub_overlap_cuda(int i, int j, int k, int l, uint6
 // CUDA kernel to mark all feasible 4-combinations as boolean array
 // Each thread handles multiple i values for one problem using the same loop structure
 __global__ void solve_resub_problems_kernel_all(uint64_t *flat_problems, char *feasibility_results,
-                                               int *problem_offsets, int *combination_offsets, 
+                                               int *problem_offsets, unsigned long long *combination_offsets,
                                                int *num_inputs, int M) {
     int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
     int problem_id = global_tid / THREADS_PER_PROBLEM;
@@ -64,7 +64,7 @@ __global__ void solve_resub_problems_kernel_all(uint64_t *flat_problems, char *f
     int problem_offset = problem_offsets[problem_id];
     int n_divs = (problem_offsets[problem_id + 1] - problem_offset) / nWords - 1;
     
-    int combination_base = combination_offsets[problem_id];
+    unsigned long long combination_base = combination_offsets[problem_id];
     
     // Each thread handles multiple values of i using stride pattern (same as original)
     for (int i = thread_in_problem; i < n_divs; i += THREADS_PER_PROBLEM) {
@@ -72,8 +72,13 @@ __global__ void solve_resub_problems_kernel_all(uint64_t *flat_problems, char *f
             for (int k = j + 1; k < n_divs; k++) {
                 for (int l = k + 1; l < n_divs; l++) {
                     // Calculate index in feasibility array using 4D indexing
-                    int combination_idx = l + k * n_divs + j * n_divs * n_divs + i * n_divs * n_divs * n_divs;
-                    int global_idx = combination_base + combination_idx;
+                    unsigned long long nd = static_cast<unsigned long long>(n_divs);
+                    unsigned long long combination_idx =
+                        static_cast<unsigned long long>(l) +
+                        static_cast<unsigned long long>(k) * nd +
+                        static_cast<unsigned long long>(j) * nd * nd +
+                        static_cast<unsigned long long>(i) * nd * nd * nd;
+                    unsigned long long global_idx = combination_base + combination_idx;
                     
                     uint32_t mask = solve_resub_overlap_cuda(i, j, k, l, flat_problems, nWords, problem_offset, n_divs);
                     feasibility_results[global_idx] = (mask != 0) ? 1 : 0;
@@ -85,32 +90,32 @@ __global__ void solve_resub_problems_kernel_all(uint64_t *flat_problems, char *f
 
 // Host function to launch new CUDA kernel that finds all feasible sets
 void solve_resub_problems_cuda_all(uint64_t *flat_problems, char *feasibility_results,
-                                   int *problem_offsets, int *combination_offsets, 
-                                   int *num_inputs, int M, int total_elements, int total_combinations) {
+                                   int *problem_offsets, unsigned long long *combination_offsets,
+                                   int *num_inputs, int M, int total_elements, unsigned long long total_combinations) {
     // Allocate device memory
     uint64_t *d_flat_problems;
     char *d_feasibility_results;
     int *d_problem_offsets;
-    int *d_combination_offsets;
+    unsigned long long *d_combination_offsets;
     int *d_num_inputs;
-    
+
     CHECK_CUDA_ERROR(cudaMalloc(&d_flat_problems, total_elements * sizeof(uint64_t)));
     CHECK_CUDA_ERROR(cudaMalloc(&d_feasibility_results, total_combinations * sizeof(char)));
     CHECK_CUDA_ERROR(cudaMalloc(&d_problem_offsets, (M + 1) * sizeof(int)));
-    CHECK_CUDA_ERROR(cudaMalloc(&d_combination_offsets, (M + 1) * sizeof(int)));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_combination_offsets, (M + 1) * sizeof(unsigned long long)));
     CHECK_CUDA_ERROR(cudaMalloc(&d_num_inputs, M * sizeof(int)));
     
     // Copy data to device
     CHECK_CUDA_ERROR(cudaMemcpy(d_flat_problems, flat_problems, total_elements * sizeof(uint64_t), cudaMemcpyHostToDevice));
     CHECK_CUDA_ERROR(cudaMemcpy(d_problem_offsets, problem_offsets, (M + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR(cudaMemcpy(d_combination_offsets, combination_offsets, (M + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(d_combination_offsets, combination_offsets, (M + 1) * sizeof(unsigned long long), cudaMemcpyHostToDevice));
     CHECK_CUDA_ERROR(cudaMemcpy(d_num_inputs, num_inputs, M * sizeof(int), cudaMemcpyHostToDevice));
     
     // Launch kernel
     int blockSize = BLOCK_SIZE;
     int totalThreads = M * THREADS_PER_PROBLEM;
     int numBlocks = (totalThreads + blockSize - 1) / blockSize;
-    
+
     solve_resub_problems_kernel_all<<<numBlocks, blockSize>>>(d_flat_problems, d_feasibility_results,
                                                               d_problem_offsets, d_combination_offsets, 
                                                               d_num_inputs, M);
@@ -140,10 +145,10 @@ void feasibility_check_cuda_all(std::vector<Window>::iterator begin, std::vector
     
     // Calculate total size needed for truth tables and build offset arrays
     std::vector<int> problem_offsets(M + 1);  // M+1 elements
-    std::vector<int> combination_offsets(M + 1);  // M+1 elements
+    std::vector<unsigned long long> combination_offsets(M + 1);  // M+1 elements
     std::vector<int> num_inputs(M);
     int total_elements = 0;
-    int total_combinations = 0;
+    unsigned long long total_combinations = 0;
     
     int idx = 0;
     for (auto it = begin; it != end; ++it, ++idx) {
@@ -158,7 +163,8 @@ void feasibility_check_cuda_all(std::vector<Window>::iterator begin, std::vector
         total_elements += n_truth_tables * nWords;
         
         combination_offsets[idx] = total_combinations;
-        total_combinations += n_divs * n_divs * n_divs * n_divs;  // D^4 combinations
+        unsigned long long nd = static_cast<unsigned long long>(n_divs);
+        total_combinations += nd * nd * nd * nd;  // D^4 combinations
     }
     problem_offsets[M] = total_elements;  // Last element points to end
     combination_offsets[M] = total_combinations;  // Last element points to end
@@ -184,7 +190,6 @@ void feasibility_check_cuda_all(std::vector<Window>::iterator begin, std::vector
             }
         }
     }
-    
     // Call CUDA kernel to find all feasible sets
     cuda::solve_resub_problems_cuda_all(flat_problems.data(), feasibility_results.data(),
                                         problem_offsets.data(), combination_offsets.data(),
@@ -194,7 +199,7 @@ void feasibility_check_cuda_all(std::vector<Window>::iterator begin, std::vector
     idx = 0;
     for (auto it = begin; it != end; ++it, ++idx) {
         int n_divs = it->truth_tables.size() - 1;  // -1 for target
-        int combination_base = combination_offsets[idx];
+        unsigned long long combination_base = combination_offsets[idx];
         
         assert(it->feasible_sets.empty());
         
@@ -203,8 +208,13 @@ void feasibility_check_cuda_all(std::vector<Window>::iterator begin, std::vector
             for (int j = i + 1; j < n_divs; j++) {
                 for (int k = j + 1; k < n_divs; k++) {
                     for (int l = k + 1; l < n_divs; l++) {
-                        int combination_idx = l + k * n_divs + j * n_divs * n_divs + i * n_divs * n_divs * n_divs;
-                        int global_idx = combination_base + combination_idx;
+                        unsigned long long nd = static_cast<unsigned long long>(n_divs);
+                        unsigned long long combination_idx =
+                            static_cast<unsigned long long>(l) +
+                            static_cast<unsigned long long>(k) * nd +
+                            static_cast<unsigned long long>(j) * nd * nd +
+                            static_cast<unsigned long long>(i) * nd * nd * nd;
+                        unsigned long long global_idx = combination_base + combination_idx;
                         
                         if (feasibility_results[global_idx]) {
                             FeasibleSet fs;
