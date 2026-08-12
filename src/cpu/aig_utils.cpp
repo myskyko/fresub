@@ -224,7 +224,7 @@ bool read_blif_as_cover_aig(
     if (!lut_aig) {
       throw std::runtime_error("failed to synthesize LUT while reading BLIF");
     }
-    int output_lit = aig.append_cover(*lut_aig, inputs);
+    int output_lit = aig.appendcover(*lut_aig, inputs);
     delete lut_aig;
 
     node_to_lit[n] = output_lit;
@@ -236,8 +236,8 @@ bool read_blif_as_cover_aig(
   });
 
   aig.supportfanouts();
-  aig.remove_dangling_nodes();
-  aig.remove_dead_covers();
+  aig.removedanglingnodes();
+  aig.removedeadcovers();
 
   if (verbose) {
     std::cout << "Read BLIF as AIG: " << aig.nPis << " PIs, " << aig.nPos

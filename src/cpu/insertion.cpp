@@ -225,9 +225,10 @@ namespace fresub {
       if (!synth) {
         throw std::runtime_error("failed to synthesize LUT replacement");
       }
-      const int new_lit = aig.append_cover(*synth, selected_nodes);
+      const int new_lit = aig.appendcover(*synth, selected_nodes);
       delete synth;
-      aig.replacenode(win.target_node, new_lit, false);
+      aig.replacenode(win.target_node, new_lit, true);
+      aig.replacecover(win.target_node, new_lit >> 1);
 
       if (verbose) {
         std::cout << "Applied LUT candidate: target=" << win.target_node
@@ -241,7 +242,7 @@ namespace fresub {
     if (verbose) {
       std::cout << "LUT heap processing complete: " << applied << " applied, " << skipped << " skipped\n";
     }
-    aig.remove_dead_covers();
+    aig.removedeadcovers();
     return applied;
   }
 
