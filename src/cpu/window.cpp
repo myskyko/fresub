@@ -65,8 +65,11 @@ bool extract_bfs_tfi_window(const GraphView& graph, int target, const BfsWindowP
     }
   }
 
-  for (int node = 1; node < graph.nObjs && static_cast<int>(window.nodes.size()) < ps.max_nodes; ++node) {
-    if (in_window[node] || graph.fanins[node].empty()) {
+  for (int node : graph.roots) {
+    if (static_cast<int>(window.nodes.size()) >= ps.max_nodes) {
+      break;
+    }
+    if (in_window[node] || inputs.count(node)) {
       continue;
     }
     bool all_fanins_inside = true;
