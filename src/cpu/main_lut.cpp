@@ -25,6 +25,8 @@ struct Config {
   std::string output_file;
   int max_inputs = 4;
   int max_nodes = 64;
+  int max_divisors = 0;
+  unsigned long long cuda_max_result_bytes = 0;
   int k_windows = 100;
   unsigned int rng_seed = 42;
   bool verbose = false;
@@ -33,6 +35,11 @@ struct Config {
   bool use_cuda_all = false;
   bool feas_all = false;
 };
+
+static unsigned long long cuda_all_result_bytes(const Window& window) {
+  const unsigned long long n_divs = window.truth_tables.empty() ? 0ull : window.truth_tables.size() - 1ull;
+  return n_divs * n_divs * n_divs * n_divs;
+}
 
 int main(int argc, char** argv) {
   Config config;
@@ -45,6 +52,10 @@ int main(int argc, char** argv) {
       config.max_inputs = std::atoi(argv[++i]);
     } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
       config.max_nodes = std::atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--max-divisors") == 0 && i + 1 < argc) {
+      config.max_divisors = std::atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--cuda-max-result-mb") == 0 && i + 1 < argc) {
+      config.cuda_max_result_bytes = std::strtoull(argv[++i], nullptr, 10) * 1024ull * 1024ull;
     } else if (strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
       config.k_windows = std::atoi(argv[++i]);
     } else if (strcmp(argv[i], "--cuda") == 0) {
@@ -70,6 +81,8 @@ int main(int argc, char** argv) {
     std::cerr << "Options:\n";
     std::cerr << "  -i <N>        Max window boundary inputs (default: 4)\n";
     std::cerr << "  -n <N>        Max graph nodes per window (default: 64)\n";
+    std::cerr << "  --max-divisors <N>  Cap divisors per window before simulation/feasibility (default: unlimited)\n";
+    std::cerr << "  --cuda-max-result-mb <N>  Max CUDA-all result bytes per batch in MB (default: unlimited)\n";
     std::cerr << "  -k <K>        Process K random windows (default: 100)\n";
     std::cerr << "  --seed <N>    RNG seed for -k sampling (default: 42)\n";
     std::cerr << "  -v            Verbose output\n";
@@ -79,7 +92,6 @@ int main(int argc, char** argv) {
     std::cerr << "  --feas-all    CPU feasibility: ALL mode (default is MIN-SIZE)\n";
     return 1;
   }
-
   aigman aig;
   if (!read_blif_as_cover_aig(config.input_file, aig, config.verbose)) {
     std::cerr << "Failed to read BLIF: " << config.input_file << "\n";
@@ -127,11 +139,38 @@ int main(int argc, char** argv) {
   }
 
   for (auto& window : windows) {
+    if (config.max_divisors > 0 && window.divisors.size() > static_cast<size_t>(config.max_divisors)) {
+      window.divisors.resize(static_cast<size_t>(config.max_divisors));
+    }
+  }
+
+  for (auto& window : windows) {
     window.truth_tables = compute_truth_tables_for_window(aig, window, config.verbose);
   }
 
   if (config.use_cuda_all) {
-    feasibility_check_cuda_all(windows.begin(), windows.end());
+    if (config.cuda_max_result_bytes == 0) {
+      feasibility_check_cuda_all(windows.begin(), windows.end());
+    } else {
+      auto batch_begin = windows.begin();
+      while (batch_begin != windows.end()) {
+        auto batch_end = batch_begin;
+        unsigned long long batch_bytes = 0;
+        while (batch_end != windows.end()) {
+          const unsigned long long window_bytes = cuda_all_result_bytes(*batch_end);
+          if (batch_end != batch_begin && batch_bytes + window_bytes > config.cuda_max_result_bytes) {
+            break;
+          }
+          batch_bytes += window_bytes;
+          ++batch_end;
+          if (window_bytes > config.cuda_max_result_bytes) {
+            break;
+          }
+        }
+        feasibility_check_cuda_all(batch_begin, batch_end);
+        batch_begin = batch_end;
+      }
+    }
   } else if (config.use_cuda) {
     feasibility_check_cuda(windows.begin(), windows.end());
   } else if (config.feas_all) {
