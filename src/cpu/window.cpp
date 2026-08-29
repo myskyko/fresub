@@ -65,23 +65,33 @@ bool extract_bfs_tfi_window(const GraphView& graph, int target, const BfsWindowP
     }
   }
 
-  for (int node : graph.roots) {
-    if (static_cast<int>(window.nodes.size()) >= ps.max_nodes) {
-      break;
-    }
-    if (in_window[node] || inputs.count(node)) {
-      continue;
-    }
-    bool all_fanins_inside = true;
-    for (int fanin : graph.fanins[node]) {
-      if (!in_window[fanin]) {
-        all_fanins_inside = false;
-        break;
+  std::queue<int> tfo_queue;
+  for (int node : window.nodes) {
+    tfo_queue.push(node);
+  }
+  while (!tfo_queue.empty() && static_cast<int>(window.nodes.size()) < ps.max_nodes) {
+    const int node = tfo_queue.front();
+    tfo_queue.pop();
+
+    for (int fanout : graph.fanouts[node]) {
+      if (in_window[fanout] || inputs.count(fanout)) {
+        continue;
       }
-    }
-    if (all_fanins_inside) {
-      in_window[node] = true;
-      window.nodes.push_back(node);
+      bool all_fanins_inside = true;
+      for (int fanin : graph.fanins[fanout]) {
+        if (!in_window[fanin]) {
+          all_fanins_inside = false;
+          break;
+        }
+      }
+      if (all_fanins_inside) {
+        in_window[fanout] = true;
+        window.nodes.push_back(fanout);
+        tfo_queue.push(fanout);
+        if (static_cast<int>(window.nodes.size()) >= ps.max_nodes) {
+          break;
+        }
+      }
     }
   }
   window.inputs.assign(inputs.begin(), inputs.end());
