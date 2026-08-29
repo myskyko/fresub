@@ -186,6 +186,7 @@ void window_extract_all(aigman& aig, int max_cut_size, bool verbose, std::vector
 void window_extract_aig_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose, std::vector<Window>& windows) {
   windows.clear();
   const auto graph = make_aig_graph(aig);
+  std::vector<int> deref(aig.nObjs, 0);
   for (int root : graph.roots) {
     Window window;
     if (!extract_bfs_tfi_window(graph, root, ps, window)) {
@@ -194,7 +195,6 @@ void window_extract_aig_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose
 
     window.cut_id = -1;
 
-    std::vector<int> deref(aig.nObjs, 0);
     const auto mffc = compute_mffc(aig, window.target_node, deref);
     const auto tfo = compute_tfo_in_window(aig, window.target_node, window.nodes);
     for (int node : window.nodes) {
@@ -213,6 +213,7 @@ void window_extract_aig_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose
 void window_extract_lut_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose, std::vector<Window>& windows) {
   windows.clear();
   const auto graph = make_lut_graph(aig);
+  std::vector<int> deref(aig.nObjs, 0);
   for (int root : graph.roots) {
     Window window;
     if (!extract_bfs_tfi_window(graph, root, ps, window)) {
@@ -231,7 +232,6 @@ void window_extract_lut_bfs(aigman& aig, const BfsWindowParams& ps, bool verbose
     aig.getgates(gates, window.inputs, outputs);
     window.nodes = std::move(gates);
 
-    std::vector<int> deref(aig.nObjs, 0);
     const auto mffc = compute_mffc(aig, window.target_node, deref);
     const auto tfo = compute_tfo_in_window(aig, window.target_node, window.nodes);
     for (int input : window.inputs) {
